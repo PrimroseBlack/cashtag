@@ -1,8 +1,13 @@
 """Persistence layer.
 
-SQLite by default; set CASHTAG_DATABASE_URL to a postgresql+psycopg:// URL and
-nothing else changes. Everything here is plain SQLAlchemy Core-style ORM with no
+SQLite by default; point CASHTAG_DATABASE_URL at Postgres and nothing else
+changes. Everything here is plain SQLAlchemy Core-style ORM with no
 dialect-specific SQL, which is the whole reason the swap is free.
+
+Hosted Postgres URLs are normalized on the way in — see `_normalize_database_url`.
+Do not require callers to hand-craft a driver-qualified URL: on Render, Heroku,
+Fly, and Railway the URL is injected by the platform, so there is no human in the
+loop to add a suffix to.
 
 Schema note: one row per (post, ticker) pair, not per post. A post saying
 "$GME and $AMC to the moon" produces two rows. That is what makes per-ticker
@@ -145,10 +150,44 @@ _engine = None
 _SessionLocal = None
 
 
+def _normalize_database_url(url: str) -> str:
+    """Rewrite a hosted-Postgres URL to name the driver we actually install.
+
+    SQLAlchemy resolves a bare `postgresql://` to `postgresql+psycopg2://` — the
+    psycopg2 driver. pyproject installs psycopg 3 (`psycopg[binary]`), so a bare
+    URL dies at startup with `ModuleNotFoundError: No module named 'psycopg2'`.
+
+    That is not a theoretical mismatch. Render's `fromDatabase: connectionString`
+    injects a bare `postgresql://` URL directly into the environment, and Heroku,
+    Fly, and Railway all do the same. There is no human in that path to append a
+    `+psycopg` suffix, so requiring one guarantees a failed deploy. Normalizing
+    here is the only place that can see every entry point.
+
+    Also handles the legacy `postgres://` scheme (still emitted by some
+    providers), which SQLAlchemy refuses outright with NoSuchModuleError rather
+    than mapping to a driver at all.
+
+    Args:
+        url: Raw value of CASHTAG_DATABASE_URL.
+
+    Returns:
+        The same URL with an explicit psycopg3 driver where it was a Postgres
+        URL; unchanged for SQLite and for URLs that already name a driver.
+    """
+    if url.startswith("postgres://"):
+        # Legacy scheme — not a SQLAlchemy dialect at all.
+        return "postgresql+psycopg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    # Already driver-qualified (postgresql+psycopg://, +asyncpg://, ...) or not
+    # Postgres at all. Leave it alone — an explicit choice is the caller's to make.
+    return url
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        url = settings.database_url
+        url = _normalize_database_url(settings.database_url)
         kwargs: dict = {"future": True}
         if url.startswith("sqlite"):
             # check_same_thread=False: the scheduler thread and the ASGI server

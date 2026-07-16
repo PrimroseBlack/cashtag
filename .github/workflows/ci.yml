@@ -50,7 +50,10 @@ jobs:
           enable-cache: true
 
       - name: Install project
-        run: uv pip install --system -e ".[dev]"
+        # [postgres] too: the production driver is psycopg3, and the URL
+        # normalization tests build a real Postgres engine. Installing only
+        # [dev] would leave CI validating a dependency set we never deploy.
+        run: uv pip install --system -e ".[dev,postgres]"
 
       - name: Lint
         run: ruff check src tests scripts
@@ -82,7 +85,10 @@ jobs:
           enable-cache: true
 
       - name: Install project
-        run: uv pip install --system -e ".[dev]"
+        # [postgres] too: the production driver is psycopg3, and the URL
+        # normalization tests build a real Postgres engine. Installing only
+        # [dev] would leave CI validating a dependency set we never deploy.
+        run: uv pip install --system -e ".[dev,postgres]"
 
       # Unit tests can pass while the server fails to start — a bad tool
       # annotation or a Pydantic schema that won't serialize only shows up at
@@ -129,7 +135,10 @@ jobs:
           enable-cache: true
 
       - name: Install project
-        run: uv pip install --system -e ".[dev]"
+        # [postgres] too: the production driver is psycopg3, and the URL
+        # normalization tests build a real Postgres engine. Installing only
+        # [dev] would leave CI validating a dependency set we never deploy.
+        run: uv pip install --system -e ".[dev,postgres]"
 
       # The seeder is demo-critical and the README quotes its numbers. It uses a
       # fixed RNG seed so those numbers are reproducible; this catches the day a
