@@ -1,0 +1,152 @@
+# CI for Cashtag.
+#
+# Replaces GitHub's python-package-conda.yml starter template, which could never
+# have passed here: it ran `conda env update --file environment.yml` against a
+# repo with no environment.yml, and pinned Python 3.10 against a project that
+# requires >=3.11. A red X on the front page of a portfolio repo is worse than no
+# CI at all — especially when the suite underneath it is green.
+#
+# This runs what the project actually uses: uv, ruff, pytest.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push makes an in-flight run obsolete; don't burn minutes finishing it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel 3.12 and 3.13 because 3.11 failed — a version-specific
+      # break is exactly what the matrix exists to surface.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-python first, so the interpreter on PATH is unambiguous. uv's
+      # --system then installs into *that* Python. Letting uv manage the
+      # interpreter as well risks --system targeting a different one than the
+      # matrix selected, which would make the matrix silently meaningless.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests scripts
+
+      - name: Format check
+        run: ruff format --check src tests scripts
+
+      - name: Test
+        # The suite is hermetic — every test writes to a temp SQLite file and no
+        # test touches a source API or the Claude API. That is a property of the
+        # architecture (sources are injectable, the buzz methodology is pure
+        # functions), not an accident, and CI is where it gets enforced.
+        run: pytest -q
+
+  smoke:
+    name: MCP server smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv pip install --system -e ".[dev]"
+
+      # Unit tests can pass while the server fails to start — a bad tool
+      # annotation or a Pydantic schema that won't serialize only shows up at
+      # registration. This is the cheapest possible check that the thing we
+      # actually ship still boots.
+      - name: Server builds and both tools register with output schemas
+        env:
+          CASHTAG_DATABASE_URL: sqlite:///ci-smoke.db
+        run: |
+          python - <<'PY'
+          import asyncio
+          from cashtag.server import build_app, mcp
+
+          tools = asyncio.run(mcp.list_tools())
+          names = sorted(t.name for t in tools)
+          assert names == ["buzz_get_ticker", "buzz_list_trending"], f"unexpected tools: {names}"
+
+          for t in tools:
+              assert t.outputSchema, f"{t.name} is missing an outputSchema"
+              assert t.description, f"{t.name} is missing a description"
+              # Both tools read a pre-computed store and must never reach a
+              # source API. If this flips, the architecture regressed.
+              assert t.annotations.readOnlyHint is True, f"{t.name} should be read-only"
+              assert t.annotations.openWorldHint is False, f"{t.name} should not be open-world"
+
+          build_app()
+          print(f"OK — {len(tools)} tools registered: {', '.join(names)}")
+          PY
+
+  seed:
+    name: Demo seed reproduces documented buzz scores
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv pip install --system -e ".[dev]"
+
+      # The seeder is demo-critical and the README quotes its numbers. It uses a
+      # fixed RNG seed so those numbers are reproducible; this catches the day a
+      # methodology change silently moves them and makes the README a lie.
+      - name: Seed and assert the documented cases
+        env:
+          CASHTAG_DATABASE_URL: sqlite:///ci-seed.db
+        run: |
+          python scripts/seed_demo.py --reset
+          python - <<'PY'
+          from cashtag.buzz import list_trending
+          from cashtag.db import session_scope
+
+          with session_scope() as s:
+              rows = {r["ticker"]: r for r in list_trending(s, limit=50)}
+
+          # GME: the obvious spike — must be flagged.
+          assert "GME" in rows, "GME should be buzzing in the demo data"
+
+          # TSLA: high volume, no anomaly. An absolute-only threshold flags this
+          # and is wrong.
+          assert "TSLA" not in rows, "TSLA must NOT be flagged (volume without anomaly)"
+
+          # RIVN: 12x ratio on 12 mentions. A ratio-only threshold flags this and
+          # is wrong.
+          assert "RIVN" not in rows, "RIVN must NOT be flagged (ratio without volume)"
+
+          print(f"OK — {len(rows)} buzzing: {', '.join(sorted(rows))}")
+          print("     TSLA and RIVN correctly excluded")
+          PY

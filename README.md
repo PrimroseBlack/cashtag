@@ -1,5 +1,7 @@
 # Cashtag
 
+[![CI](https://github.com/PrimroseBlack/cashtag/actions/workflows/ci.yml/badge.svg)](https://github.com/PrimroseBlack/cashtag/actions/workflows/ci.yml)
+
 **An MCP connector that surfaces stocks with unusually high social-media mention volume, with a bullish/bearish sentiment split per ticker.**
 
 Ask Claude *"what stocks are buzzing right now?"* and get a real answer, grounded in Reddit, X, Instagram, TikTok, and StockTwits.
