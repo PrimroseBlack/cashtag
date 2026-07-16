@@ -1,0 +1,102 @@
+# Render blueprint: two processes + a shared database.
+#
+# WHY POSTGRES AND NOT SQLITE
+# ---------------------------
+# SQLite is fine locally, and db.py supports both. It does NOT work for this
+# deployment, for a structural reason worth knowing before you hit it at 2am:
+# the MCP server and the ingestion worker are separate services, and on Render (as
+# on Fly and Railway) a persistent disk attaches to exactly ONE service. Two
+# services cannot share a SQLite file. Without a disk the filesystem is ephemeral
+# anyway, so every deploy would silently reset the store.
+#
+# So: SQLite for local dev, Postgres in production. The only thing that changes is
+# CASHTAG_DATABASE_URL — no code, which is the payoff for keeping db.py free of
+# dialect-specific SQL.
+#
+# Deploy:
+#   1. Push this repo to GitHub.
+#   2. Render Dashboard -> New -> Blueprint -> pick the repo.
+#   3. Fill the `sync: false` secrets when prompted (they are never committed).
+#   4. Copy the web service's https URL; append /mcp for the connector URL.
+
+databases:
+  - name: cashtag-db
+    databaseName: cashtag
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  # ---- MCP server: read-only, fast, public ----------------------------------
+  - type: web
+    name: cashtag-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -e ".[postgres]"
+    startCommand: python -m uvicorn cashtag.server:build_app --factory --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: CASHTAG_DATABASE_URL
+        fromDatabase:
+          name: cashtag-db
+          property: connectionString
+      - key: CASHTAG_AUTH_TOKEN
+        generateValue: true   # Render generates a strong token; read it in the dashboard.
+      - key: PYTHON_VERSION
+        value: "3.13"
+
+  # ---- Ingestion worker: slow, flaky, billable ------------------------------
+  # Separate service on purpose. This is the process that talks to Reddit, X,
+  # Bright Data, StockTwits, and the Claude API. Keeping it off the request path
+  # is the whole architecture: the web service above cannot be slowed down or
+  # taken out by any of them.
+  - type: worker
+    name: cashtag-worker
+    runtime: python
+    plan: starter   # Free-tier services sleep; a sleeping worker ingests nothing.
+    buildCommand: pip install --upgrade pip && pip install -e ".[postgres]"
+    startCommand: python -m cashtag.worker
+    envVars:
+      - key: CASHTAG_DATABASE_URL
+        fromDatabase:
+          name: cashtag-db
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: "3.13"
+
+      # -- Classification --
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # -- Reddit (free tier; start the approval process early) --
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: REDDIT_USER_AGENT
+        sync: false
+
+      # -- StockTwits (free, no auth) --
+      - key: STOCKTWITS_ENABLED
+        value: "true"
+
+      # -- X (METERED: every read costs money) --
+      # Leave X_ENABLED=false until you have deliberately decided to spend.
+      # X_MONTHLY_BUDGET_USD is a hard cap enforced in code against the spend
+      # ledger in Postgres — not an in-memory counter, precisely because Render
+      # restarts containers and an in-memory cap would reset to zero on each one.
+      - key: X_ENABLED
+        value: "false"
+      - key: X_BEARER_TOKEN
+        sync: false
+      - key: X_MONTHLY_BUDGET_USD
+        value: "25.00"
+
+      # -- Bright Data (Instagram + TikTok; lowest-confidence sources) --
+      - key: BRIGHTDATA_ENABLED
+        value: "false"
+      - key: BRIGHTDATA_API_KEY
+        sync: false
+      - key: BRIGHTDATA_INSTAGRAM_DATASET_ID
+        sync: false
+      - key: BRIGHTDATA_TIKTOK_DATASET_ID
+        sync: false
