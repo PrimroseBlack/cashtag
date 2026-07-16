@@ -30,7 +30,11 @@ services:
   - type: web
     name: cashtag-mcp
     runtime: python
-    plan: free
+    # starter, not free: free web services spin down when idle, and the first
+    # request after that pays a cold start. That is precisely the request that
+    # happens when someone says "show me" — claude.ai can time out on it, and a
+    # connector that fails its first call in a demo is worse than no connector.
+    plan: starter
     buildCommand: pip install --upgrade pip && pip install -e ".[postgres]"
     startCommand: python -m uvicorn cashtag.server:build_app --factory --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
