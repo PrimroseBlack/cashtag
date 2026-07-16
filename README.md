@@ -240,12 +240,18 @@ cp .env.example .env
 
 # Demoable immediately — no credentials needed.
 python scripts/seed_demo.py --reset
-python -m pytest                       # 105 tests
+python -m pytest                       # 106 tests
 python -m uvicorn cashtag.server:build_app --factory --port 8000
 curl localhost:8000/health
 ```
 
 Seed data is written with `is_synthetic=True`, and **every tool response touching a synthetic row carries a loud `SYNTHETIC DATA` warning**. Fake market signal that reads as real is genuinely dangerous — someone could trade on it.
+
+**Keep seeded and live data in separate stores.** The seeder writes a fabricated 14-day baseline (GME at 8/day, etc). If the worker then wrote real mentions into that same store, every real `buzz_score` would be measured against an invented normal — wrong, and silent. Both directions are guarded: the seeder refuses to seed over real rows, and the worker refuses to start against a seeded store. Use one DB for demos and another for live:
+
+```bash
+CASHTAG_DATABASE_URL=sqlite:///live.db python -m cashtag.worker
+```
 
 ### Real data with zero credentials
 
@@ -312,7 +318,7 @@ Both are `readOnlyHint: true` and `openWorldHint: false` — they read a local s
 ## Tests
 
 ```bash
-python -m pytest -q     # 105 passed
+python -m pytest -q     # 106 passed
 ```
 
 | File | Covers |

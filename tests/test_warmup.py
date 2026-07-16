@@ -163,3 +163,52 @@ class TestColdStartRegression:
             assert list_trending(session, limit=20) == []
 
         os.environ.pop("CASHTAG_DATABASE_URL", None)
+
+
+class TestSeededStoreGuard:
+    """The worker must not ingest real data into a seeded store."""
+
+    def test_refuses_to_start_when_synthetic_rows_present(self, tmp_path, monkeypatch):
+        # Mixing fabricated baselines with real mentions scores a real spike
+        # against an invented normal. Nothing errors — the numbers are just wrong.
+        import os
+
+        import pytest as _pytest
+
+        monkeypatch.setenv("CASHTAG_DATABASE_URL", f"sqlite:///{tmp_path}/seeded.db")
+
+        import cashtag.config as config_mod
+        import cashtag.db as db_mod
+
+        config_mod.settings = config_mod.Settings()
+        db_mod.settings = config_mod.settings
+        db_mod._engine = None
+        db_mod._SessionLocal = None
+        db_mod.reset_db()
+
+        from cashtag.db import Mention, session_scope, utcnow
+        from cashtag.worker import assert_store_not_seeded
+
+        # Clean store: allowed.
+        assert_store_not_seeded()
+
+        with session_scope() as session:
+            session.add(
+                Mention(
+                    ticker="GME",
+                    source="reddit",
+                    source_id="synthetic-1",
+                    text="$GME moon",
+                    url="https://reddit.com/x",
+                    created_utc=utcnow(),
+                    ingested_at=utcnow(),
+                    is_synthetic=True,
+                )
+            )
+
+        # Seeded store: must refuse rather than silently corrupt.
+        with _pytest.raises(SystemExit) as exc:
+            assert_store_not_seeded()
+        assert exc.value.code == 1
+
+        os.environ.pop("CASHTAG_DATABASE_URL", None)

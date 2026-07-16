@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, time as dtime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .classify import classify_pending
@@ -242,10 +242,51 @@ def print_status() -> None:
         logger.info("  %-12s %d mention rows in store", "database", len(total))
 
 
+def assert_store_not_seeded() -> None:
+    """Refuse to ingest real data into a store holding synthetic rows.
+
+    Mixing the two silently corrupts the methodology. The seeder writes a
+    fabricated 14-day baseline (GME at 8 mentions/day, etc). If the worker then
+    adds real GME mentions to that same store, every real buzz_score is computed
+    against an invented denominator — a real spike measured against a fake
+    normal. Nothing errors; the numbers are just wrong, and they look fine.
+
+    scripts/seed_demo.py already guards the other direction (it refuses to seed
+    over real rows). This closes the loop.
+
+    Failing at startup rather than warning per-tick: a warning in a hosted
+    worker's log is a warning nobody reads.
+    """
+    with session_scope() as session:
+        synthetic = session.execute(
+            select(func.count(Mention.id)).where(Mention.is_synthetic.is_(True))
+        ).scalar_one()
+
+    if synthetic:
+        logger.error(
+            "Refusing to start: this store holds %d SYNTHETIC rows from scripts/seed_demo.py.\n"
+            "Ingesting real mentions here would score them against a fabricated baseline and "
+            "silently corrupt every buzz_score.\n"
+            "\n"
+            "Pick one:\n"
+            "  - Point the worker at a clean database (recommended — keep the seeded demo "
+            "store around for recording demos):\n"
+            "      CASHTAG_DATABASE_URL=sqlite:///live.db python -m cashtag.worker\n"
+            "  - Or wipe this store completely and start collecting real data in it:\n"
+            '      python -c "from cashtag.db import reset_db; reset_db()"\n'
+            "\n"
+            "Note: `python scripts/seed_demo.py --reset` will NOT help — it drops the tables "
+            "and re-seeds them, leaving synthetic data behind again.",
+            synthetic,
+        )
+        sys.exit(1)
+
+
 def main() -> None:
     """Run the worker until interrupted."""
     init_db()
     logger.info("Cashtag worker starting")
+    assert_store_not_seeded()
     print_status()
 
     scheduler = BackgroundScheduler(timezone=timezone.utc)
